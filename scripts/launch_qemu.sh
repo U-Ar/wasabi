@@ -12,7 +12,7 @@ qemu-system-x86_64 \
   -machine q35 \
   -drive format=raw,file=fat:rw:mnt \
   -monitor telnet:0.0.0.0:2345,server,nowait,logfile=log/qemu_monitor.txt \
-  -chardev stdio,id=char_com1,mux=on,logfile=log/com1.txt \
+  -chardev stdio,id=char_com1,mux=on,logfile=log/com1log.txt \
   -serial chardev:char_com1 \
   -device qemu-xhci \
   -device usb-kbd \
