@@ -647,21 +647,18 @@ struct EventWaitInfo {
 }
 impl EventWaitInfo {
     fn matches(&self, trb: &GenericTrbEntry) -> bool {
-        if let Some(tt) = self.cond.trb_type {
-            if trb.trb_type() != tt as u32 {
+        if let Some(tt) = self.cond.trb_type
+            && trb.trb_type() != tt as u32 {
                 return false;
             }
-        }
-        if let Some(addr) = self.cond.trb_addr {
-            if trb.data() != addr {
+        if let Some(addr) = self.cond.trb_addr
+            && trb.data() != addr {
                 return false;
             }
-        }
-        if let Some(slot) = self.cond.slot {
-            if trb.slot_id() != slot {
+        if let Some(slot) = self.cond.slot
+            && trb.slot_id() != slot {
                 return false;
             }
-        }
         true
     }
     fn resolve(&self, trb: &GenericTrbEntry) -> Result<()> {
