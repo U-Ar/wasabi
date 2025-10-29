@@ -4,6 +4,9 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::rc::Weak;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::cmp::max;
@@ -142,7 +145,57 @@ impl PciXhciDriver {
             info!("AddressDeviceCommand succeeded.");
             let device_descriptor =
                 Self::request_device_descriptor(&xhc, slot, &mut ctrl_ep_ring).await?;
-            info!("DeviceDescriptor: {:?}", device_descriptor);
+            info!("Got a DeviceDescriptor: {:?}", device_descriptor);
+            let vid = device_descriptor.vendor_id;
+            let pid = device_descriptor.product_id;
+            info!("xhci: device detected: vid:pid = {:#06x}:{:#06x}", vid, pid);
+            if let Ok(e) = Self::request_string_descriptor_zero(&xhc, slot, &mut ctrl_ep_ring).await
+            {
+                let lang_id = e[1];
+                let vendor = if device_descriptor.manufacturer_idx != 0 {
+                    Some(
+                        Self::request_string_descriptor(
+                            &xhc,
+                            slot,
+                            &mut ctrl_ep_ring,
+                            lang_id,
+                            device_descriptor.manufacturer_idx,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let product = if device_descriptor.product_idx != 0 {
+                    Some(
+                        Self::request_string_descriptor(
+                            &xhc,
+                            slot,
+                            &mut ctrl_ep_ring,
+                            lang_id,
+                            device_descriptor.product_idx,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let serial = if device_descriptor.serial_idx != 0 {
+                    Some(
+                        Self::request_string_descriptor(
+                            &xhc,
+                            slot,
+                            &mut ctrl_ep_ring,
+                            lang_id,
+                            device_descriptor.serial_idx,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                info!("xhci: v/p/s = {:?}/{:?}/{:?}", vendor, product, serial);
+            }
         }
         Ok(())
     }
@@ -203,6 +256,46 @@ impl PciXhciDriver {
         )
         .await?;
         Ok(*desc)
+    }
+    async fn request_string_descriptor(
+        xhc: &Rc<Controller>,
+        slot: u8,
+        ctrl_ep_ring: &mut CommandRing,
+        lang_id: u16,
+        index: u8,
+    ) -> Result<String> {
+        let buf = vec![0; 128];
+        let mut buf = Box::into_pin(buf.into_boxed_slice());
+        xhc.request_descriptor(
+            slot,
+            ctrl_ep_ring,
+            UsbDescriptorType::String,
+            index,
+            lang_id,
+            buf.as_mut(),
+        )
+        .await?;
+        Ok(String::from_utf8_lossy(&buf[2..])
+            .to_string()
+            .replace('\0', ""))
+    }
+    async fn request_string_descriptor_zero(
+        xhc: &Rc<Controller>,
+        slot: u8,
+        ctrl_ep_ring: &mut CommandRing,
+    ) -> Result<Vec<u16>> {
+        let buf = vec![0; 8];
+        let mut buf = Box::into_pin(buf.into_boxed_slice());
+        xhc.request_descriptor(
+            slot,
+            ctrl_ep_ring,
+            UsbDescriptorType::String,
+            0,
+            0,
+            buf.as_mut(),
+        )
+        .await?;
+        Ok(buf.as_ref().get_ref().to_vec())
     }
 }
 
@@ -861,7 +954,7 @@ impl GenericTrbEntry {
         self.control.write_bits(0, 1, cycle.into()).unwrap();
     }
     fn set_toggle_cycle(&mut self, value: bool) {
-        self.control.write_bits(0, 1, value.into()).unwrap();
+        self.control.write_bits(1, 1, value.into()).unwrap();
     }
     fn data(&self) -> u64 {
         self.data.read()
@@ -1343,7 +1436,7 @@ impl SetupStageTrb {
     pub const REQ_GET_DESCRIPTOR: u8 = 6;
     pub const REQ_SET_CONFIGURATION: u8 = 9;
     pub const REQ_SET_INTERFACE: u8 = 11;
-    pub const REQ_SET_PROTOCOL: u8 = 11;
+    pub const REQ_SET_PROTOCOL: u8 = 0x0b;
 
     pub fn new(request_type: u8, request: u8, value: u16, index: u16, length: u16) -> Self {
         // Table 4-7: USB Setup Data to Data Stage TRB and Status Stage TRB Field Mapping
