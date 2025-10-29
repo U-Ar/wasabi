@@ -134,12 +134,14 @@ impl PciXhciDriver {
         }
         if let Some(port) = connected_port {
             info!("xhci: port {port} is connected.");
-            let slot = Self::init_port(xhc, port).await?;
+            let slot = Self::init_port(&xhc, port).await?;
             info!("slot {slot} is assigned for port {port}");
+            Self::address_device(&xhc, port, slot).await?;
+            info!("AddressDeviceCommand succeeded.");
         }
         Ok(())
     }
-    async fn init_port(xhc: Rc<Controller>, port: usize) -> Result<u8> {
+    async fn init_port(xhc: &Rc<Controller>, port: usize) -> Result<u8> {
         let portsc = xhc.regs.portsc.get(port).ok_or("invalid portsc")?;
         info!("xhci: resetting port {port}...");
         portsc.reset_port().await;
@@ -154,6 +156,31 @@ impl PciXhciDriver {
             .await?
             .slot_id();
         Ok(slot)
+    }
+    async fn address_device(xhc: &Rc<Controller>, port: usize, slot: u8) -> Result<()> {
+        // Setup an input context and send AddressDevice command
+        let output_context = Box::pin(OutputContext::default());
+        xhc.set_output_context_for_slot(slot, output_context);
+        let mut input_ctrl_ctx = InputControlContext::default();
+        input_ctrl_ctx.add_context(0)?;
+        input_ctrl_ctx.add_context(1)?;
+        let mut input_context = Box::pin(InputContext::default());
+        input_context.as_mut().set_input_ctrl_ctx(input_ctrl_ctx)?;
+        input_context.as_mut().set_root_hub_port_number(port)?;
+        input_context.as_mut().set_last_valid_dci(1)?;
+        let portsc = xhc.regs.portsc.get(port).ok_or("PORTSC was invalid")?;
+        input_context.as_mut().set_port_speed(portsc.port_speed())?;
+        let ctrl_ep_ring = CommandRing::default();
+        input_context.as_mut().set_ep_ctx(
+            1,
+            EndpointContext::new_control_endpoint(
+                portsc.max_packet_size()?,
+                ctrl_ep_ring.ring_phys_addr(),
+            )?,
+        )?;
+        let cmd = GenericTrbEntry::cmd_address_device(input_context.as_ref(), slot);
+        xhc.send_command(cmd).await?.cmd_result_ok()?;
+        Ok(())
     }
 }
 
@@ -358,14 +385,90 @@ struct EndpointContext {
     _reserved: [u32; 3],
 }
 const _: () = assert!(size_of::<EndpointContext>() == 32);
+impl EndpointContext {
+    fn new() -> Self {
+        unsafe { MaybeUninit::zeroed().assume_init() }
+    }
+    fn new_control_endpoint(max_packet_size: u16, tr_dequeue_ptr: u64) -> Result<Self> {
+        let mut ep = Self::new();
+        ep.set_ep_type(EndpointType::Control)?;
+        ep.set_deque_cycle_state(true)?;
+        ep.set_error_count(3)?;
+        ep.set_max_packet_size(max_packet_size);
+        ep.set_ring_dequeue_pointer(tr_dequeue_ptr)?;
+        ep.average_trb_length = 8;
+        Ok(ep)
+    }
+    fn set_ring_dequeue_pointer(&mut self, ptr: u64) -> Result<()> {
+        self.tr_dequeue_ptr.write_bits(4, 60, ptr >> 4)
+    }
+    fn set_max_packet_size(&mut self, max_packet_size: u16) {
+        let max_packet_size = max_packet_size as u32;
+        self.data[1] &= !(0xffff << 16);
+        self.data[1] |= max_packet_size << 16;
+    }
+    fn set_error_count(&mut self, error_count: u32) -> Result<()> {
+        if error_count & !0b11 == 0 {
+            self.data[1] &= !(0b11 << 1);
+            self.data[1] |= error_count << 1;
+            Ok(())
+        } else {
+            Err("Invalid error count")
+        }
+    }
+    fn set_deque_cycle_state(&mut self, dcs: bool) -> Result<()> {
+        self.tr_dequeue_ptr.write_bits(0, 1, dcs.into())
+    }
+    fn set_ep_type(&mut self, ep_type: EndpointType) -> Result<()> {
+        let raw_ep_type = ep_type as u32;
+        if raw_ep_type < 8 {
+            self.data[1] &= !(0b1111 << 3);
+            self.data[1] |= raw_ep_type << 3;
+            Ok(())
+        } else {
+            Err("Invalid endpoint type")
+        }
+    }
+}
 
 #[repr(C, align(32))]
 #[derive(Default)]
 struct DeviceContext {
     slot_ctx: [u32; 8],
     ep_ctx: [EndpointContext; 31],
+    _pinned: PhantomPinned,
 }
 const _: () = assert!(size_of::<DeviceContext>() == 1024);
+
+impl DeviceContext {
+    fn set_port_speed(&mut self, mode: UsbMode) -> Result<()> {
+        if mode.psi() < 16u32 {
+            self.slot_ctx[0] &= !(0xf << 20);
+            self.slot_ctx[0] |= (mode.psi()) << 20;
+            Ok(())
+        } else {
+            Err("psi out of range")
+        }
+    }
+    fn set_last_valid_dci(&mut self, dci: usize) -> Result<()> {
+        if dci <= 31 {
+            self.slot_ctx[0] &= !(0b11111 << 27);
+            self.slot_ctx[0] |= (dci as u32) << 27;
+            Ok(())
+        } else {
+            Err("num_ep_ctx out of range")
+        }
+    }
+    fn set_root_hub_port_number(&mut self, port: usize) -> Result<()> {
+        if 0 < port && port < 256 {
+            self.slot_ctx[1] &= !(0xff << 16);
+            self.slot_ctx[1] |= (port as u32) << 16;
+            Ok(())
+        } else {
+            Err("port number out of range")
+        }
+    }
+}
 
 #[repr(C, align(4096))]
 #[derive(Default)]
@@ -377,7 +480,8 @@ const _: () = assert!(size_of::<OutputContext>() <= 4096);
 
 struct DeviceContextBaseAddressArray {
     inner: Pin<Box<RawDeviceContextBaseAddressArray>>,
-    _context: [Option<Pin<Box<OutputContext>>>; 255],
+    // NB: the index of context is [slot - 1]
+    context: [Option<Pin<Box<OutputContext>>>; 255],
     _scratchpad_buffers: ScratchpadBuffers,
 }
 
@@ -388,12 +492,26 @@ impl DeviceContextBaseAddressArray {
         let inner = Box::pin(inner);
         Self {
             inner,
-            _context: unsafe { MaybeUninit::zeroed().assume_init() },
+            context: unsafe { MaybeUninit::zeroed().assume_init() },
             _scratchpad_buffers: scratchpad_buffers,
         }
     }
     fn inner_mut_ptr(&mut self) -> *const RawDeviceContextBaseAddressArray {
         self.inner.as_ref().get_ref() as *const RawDeviceContextBaseAddressArray
+    }
+    fn set_output_context(&mut self, slot: u8, output_context: Pin<Box<OutputContext>>) {
+        let ctx_idx = slot as usize - 1;
+        // Own the output context here
+        self.context[ctx_idx] = Some(output_context);
+        // set it in the actual pointer array
+        unsafe {
+            self.inner.as_mut().get_unchecked_mut().context[ctx_idx] =
+                self.context[ctx_idx]
+                    .as_ref()
+                    .expect("output context was none")
+                    .as_ref()
+                    .get_ref() as *const OutputContext as u64;
+        }
     }
 }
 
@@ -450,6 +568,11 @@ impl Controller {
     }
     fn notify_xhc(&self) {
         self.regs.doorbell_regs[0].notify(0, 0);
+    }
+    fn set_output_context_for_slot(&self, slot: u8, output_context: Pin<Box<OutputContext>>) {
+        self.device_context_base_array
+            .lock()
+            .set_output_context(slot, output_context);
     }
 }
 
@@ -695,6 +818,33 @@ impl GenericTrbEntry {
         trb.set_trb_type(TrbType::EnableSlotCommand);
         trb
     }
+    pub fn completion_code(&self) -> u32 {
+        self.option.read_bits(24, 8)
+    }
+    fn cmd_result_ok(&self) -> Result<()> {
+        if self.trb_type() != TrbType::CommandCompletionEvent as u32 {
+            Err("Not a CommandCompletionEvent")
+        } else if self.completion_code() != 1 {
+            info!(
+                "Completion code was not Success: {}",
+                self.completion_code()
+            );
+            Err("Command did not complete successfully")
+        } else {
+            Ok(())
+        }
+    }
+    fn set_slot_id(&mut self, slot: u8) {
+        self.control.write_bits(24, 8, slot as u32).unwrap()
+    }
+    fn cmd_address_device(input_context: Pin<&InputContext>, slot: u8) -> Self {
+        let mut trb = Self::default();
+        trb.set_trb_type(TrbType::AddressDeviceCommand);
+        trb.data
+            .write(input_context.get_ref() as *const InputContext as u64);
+        trb.set_slot_id(slot);
+        trb
+    }
 }
 
 struct CommandRing {
@@ -857,6 +1007,23 @@ impl PortScEntry {
     pub fn is_enabled(&self) -> bool {
         self.pp() && self.ccs() && self.ped() && !self.pr()
     }
+    pub fn max_packet_size(&self) -> Result<u16> {
+        match self.port_speed() {
+            UsbMode::FullSpeed | UsbMode::LowSpeed => Ok(8),
+            UsbMode::HighSpeed => Ok(64),
+            UsbMode::SuperSpeed => Ok(512),
+            _ => Err("Unknown Protocol Speed ID"),
+        }
+    }
+    pub fn port_speed(&self) -> UsbMode {
+        match extract_bits(self.value(), 10, 4) {
+            1 => UsbMode::FullSpeed,
+            2 => UsbMode::LowSpeed,
+            3 => UsbMode::HighSpeed,
+            4 => UsbMode::SuperSpeed,
+            v => UsbMode::Unknown(v),
+        }
+    }
 }
 
 pub struct Doorbell {
@@ -913,6 +1080,98 @@ impl Future for EventFuture {
             Poll::Ready(Ok(trb))
         } else {
             Poll::Pending
+        }
+    }
+}
+
+#[repr(C, align(32))]
+#[derive(Default)]
+pub struct InputControlContext {
+    drop_context_bitmap: u32,
+    add_context_bitmap: u32,
+    _reserved: [u32; 6],
+    _pinned: PhantomPinned,
+}
+const _: () = assert!(size_of::<InputControlContext>() == 32);
+
+impl InputControlContext {
+    pub fn add_context(&mut self, ici: usize) -> Result<()> {
+        if ici < 32 {
+            self.add_context_bitmap |= 1 << ici;
+            Ok(())
+        } else {
+            Err("Input Context index out of range")
+        }
+    }
+}
+
+#[repr(C, align(4096))]
+#[derive(Default)]
+pub struct InputContext {
+    input_ctrl_ctx: InputControlContext,
+    device_ctx: DeviceContext,
+    _pinned: PhantomPinned,
+}
+const _: () = assert!(size_of::<InputContext>() <= 4096);
+
+impl InputContext {
+    fn set_ep_ctx(self: &mut Pin<&mut Self>, dci: usize, ep_ctx: EndpointContext) -> Result<()> {
+        unsafe { self.as_mut().get_unchecked_mut().device_ctx.ep_ctx[dci - 1] = ep_ctx }
+        Ok(())
+    }
+    fn set_input_ctrl_ctx(
+        self: &mut Pin<&mut Self>,
+        input_ctrl_ctx: InputControlContext,
+    ) -> Result<()> {
+        unsafe { self.as_mut().get_unchecked_mut().input_ctrl_ctx = input_ctrl_ctx }
+        Ok(())
+    }
+    fn set_port_speed(self: &mut Pin<&mut Self>, psi: UsbMode) -> Result<()> {
+        unsafe { self.as_mut().get_unchecked_mut() }
+            .device_ctx
+            .set_port_speed(psi)
+    }
+    fn set_root_hub_port_number(self: &mut Pin<&mut Self>, port: usize) -> Result<()> {
+        unsafe { self.as_mut().get_unchecked_mut() }
+            .device_ctx
+            .set_root_hub_port_number(port)
+    }
+    fn set_last_valid_dci(self: &mut Pin<&mut Self>, dci: usize) -> Result<()> {
+        unsafe { self.as_mut().get_unchecked_mut() }
+            .device_ctx
+            .set_last_valid_dci(dci)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+#[repr(u8)]
+#[derive(PartialEq, Eq)]
+pub enum EndpointType {
+    IsochOut = 1,
+    BulkOut = 2,
+    InterruptOut = 3,
+    Control = 4,
+    IsochIn = 5,
+    BulkIn = 6,
+    InterruptIn = 7,
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum UsbMode {
+    Unknown(u32),
+    FullSpeed,
+    LowSpeed,
+    HighSpeed,
+    SuperSpeed,
+}
+impl UsbMode {
+    pub fn psi(&self) -> u32 {
+        match *self {
+            UsbMode::FullSpeed => 1,
+            UsbMode::LowSpeed => 2,
+            UsbMode::HighSpeed => 3,
+            UsbMode::SuperSpeed => 4,
+            UsbMode::Unknown(v) => v,
         }
     }
 }
