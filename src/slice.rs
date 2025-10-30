@@ -4,24 +4,17 @@ use core::mem::size_of;
 use core::slice;
 
 /// # Safety
-/// Implementing this trait is safe only if the target type can be converted mutually 
+/// Implementing this trait is safe only if the target type can be converted mutually
 /// between a byte sequnce of the same size
 pub unsafe trait Sliceable: Sized + Copy + Clone {
     fn as_slice(&self) -> &[u8] {
-        unsafe {
-            slice::from_raw_parts(
-                (self as *const Self) as *const u8,
-                size_of::<Self>(),
-            )
-        }
+        unsafe { slice::from_raw_parts((self as *const Self) as *const u8, size_of::<Self>()) }
     }
     fn copy_from_slice(data: &[u8]) -> Result<Self> {
         if size_of::<Self>() > data.len() {
             Err("data is too short")
         } else {
-            Ok(unsafe {
-                *(data.as_ptr() as *const Self)
-            })
+            Ok(unsafe { *(data.as_ptr() as *const Self) })
         }
     }
 }
