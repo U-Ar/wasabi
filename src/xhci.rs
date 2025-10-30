@@ -195,6 +195,13 @@ impl PciXhciDriver {
                     None
                 };
                 info!("xhci: v/p/s = {:?}/{:?}/{:?}", vendor, product, serial);
+                let descriptors = Self::request_config_descriptor_and_rest(
+                    &xhc,
+                    slot,
+                    &mut ctrl_ep_ring,
+                )
+                    .await?;
+                info!("xhci: {descriptors:?}")
             }
         }
         Ok(())
@@ -296,6 +303,14 @@ impl PciXhciDriver {
         )
         .await?;
         Ok(buf.as_ref().get_ref().to_vec())
+    }
+    async fn request_config_descriptor_and_rest(
+        xhc: &Rc<Controller>,
+        slot: u8,
+        ctrl_ep_ring: &mut CommandRing,
+    ) -> Result<Vec<UsbDescriptor>> {
+        let mut config_descriptor = Box::pin(ConfigDescriptor::default());
+        // TODO
     }
 }
 
