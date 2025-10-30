@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::rc::Weak;
@@ -241,9 +242,22 @@ impl PciXhciDriver {
                     UsbHidProtocol::BootProtocol as u8,
                 )
                 .await?;
+                let mut prev_pressed = BTreeSet::new();
                 loop {
-                    let report = Self::request_hid_report(&xhc, slot, &mut ctrl_ep_ring).await?;
-                    info!("xhci: hid report: {:?}", report);
+                    let pressed = {
+                        let report =
+                            Self::request_hid_report(&xhc, slot, &mut ctrl_ep_ring).await?;
+                        BTreeSet::from_iter(report.into_iter().skip(2).filter(|id| *id != 0))
+                    };
+                    let diff = pressed.symmetric_difference(&prev_pressed);
+                    for id in diff {
+                        if pressed.contains(id) {
+                            info!("USB Keyboard key pressed: {id}");
+                        } else {
+                            info!("USB Keyboard key released: {id}");
+                        }
+                    }
+                    prev_pressed = pressed;
                 }
             }
         }
