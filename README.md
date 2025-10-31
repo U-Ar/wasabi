@@ -8,6 +8,7 @@
 
 - 2025/10時点の最新nightlyで動作するように修正
   - static mutへの制限が厳しくなっていたのでフォントキャッシュもMutex管理に変更
+  - 各種clippy警告へ対応
 
 ## How to use
 
