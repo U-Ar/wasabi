@@ -27,6 +27,7 @@ use crate::bits::extract_bits;
 use crate::executor::spawn_global;
 use crate::executor::yield_execution;
 use crate::info;
+use crate::keyboard::KeyEvent;
 use crate::mmio::IoBox;
 use crate::mmio::Mmio;
 use crate::mutex::Mutex;
@@ -251,10 +252,11 @@ impl PciXhciDriver {
                     };
                     let diff = pressed.symmetric_difference(&prev_pressed);
                     for id in diff {
+                        let key_event = KeyEvent::from_usb_key_id(*id);
                         if pressed.contains(id) {
-                            info!("USB Keyboard key pressed: {id}");
+                            info!("USB Keyboard key down: {id} = {key_event:?}");
                         } else {
-                            info!("USB Keyboard key released: {id}");
+                            info!("USB Keyboard key up  : {id} = {key_event:?}");
                         }
                     }
                     prev_pressed = pressed;
