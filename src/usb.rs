@@ -14,8 +14,42 @@ use crate::result::Result;
 use crate::slice::Sliceable;
 use crate::xhci::CommandRing;
 use crate::xhci::Controller;
-use crate::xhci::UsbDescriptorType;
-use crate::xhci::UsbDeviceDescriptor;
+
+#[derive(Debug, Copy, Clone)]
+#[repr(u8)]
+#[non_exhaustive]
+#[allow(unused)]
+#[derive(PartialEq, Eq)]
+pub enum UsbDescriptorType {
+    Device = 1,
+    Config = 2,
+    String = 3,
+    Interface = 4,
+    Endpoint = 5,
+    Report = 0x22,
+}
+
+#[derive(Debug, Copy, Clone, Default)]
+#[allow(unused)]
+#[repr(C, packed)]
+pub struct UsbDeviceDescriptor {
+    pub desc_length: u8,
+    pub desc_type: u8,
+    pub version: u16,
+    pub device_class: u8,
+    pub device_subclass: u8,
+    pub device_protocol: u8,
+    pub max_packet_size: u8,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub device_version: u16,
+    pub manufacturer_idx: u8,
+    pub product_idx: u8,
+    pub serial_idx: u8,
+    pub num_of_config: u8,
+}
+const _: () = assert!(size_of::<UsbDeviceDescriptor>() == 18);
+unsafe impl IntoPinnedMutableSlice for UsbDeviceDescriptor {}
 
 #[derive(Debug, Copy, Clone)]
 pub enum UsbDescriptor {
@@ -272,4 +306,23 @@ pub fn pick_interface_with_triple(
     } else {
         None
     }
+}
+pub async fn request_hid_report_descriptor(
+    xhc: &Rc<Controller>,
+    slot: u8,
+    ctrl_ep_ring: &mut CommandRing,
+    interface_number: u8,
+) -> Result<Vec<u8>> {
+    let buf = vec![0; 4096];
+    let mut buf = Box::into_pin(buf.into_boxed_slice());
+    xhc.request_descriptor_for_interface(
+        slot,
+        ctrl_ep_ring,
+        UsbDescriptorType::Report,
+        0,
+        interface_number.into(),
+        buf.as_mut(),
+    )
+    .await?;
+    Ok(buf.to_vec())
 }

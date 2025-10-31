@@ -31,7 +31,6 @@ use crate::pci::BarMem64;
 use crate::pci::BusDeviceFunction;
 use crate::pci::Pci;
 use crate::pci::VendorDeviceId;
-use crate::pin::IntoPinnedMutableSlice;
 use crate::result::Result;
 use crate::tablet::start_usb_tablet;
 use crate::usb;
@@ -668,7 +667,7 @@ impl Controller {
         &self,
         slot: u8,
         ctrl_ep_ring: &mut CommandRing,
-        desc_type: UsbDescriptorType,
+        desc_type: usb::UsbDescriptorType,
         desc_index: u8,
         lang_id: u16,
         buf: Pin<&mut [T]>,
@@ -679,6 +678,32 @@ impl Controller {
                 SetupStageTrb::REQ_GET_DESCRIPTOR,
                 (desc_type as u16) << 8 | (desc_index as u16),
                 lang_id,
+                (buf.len() * size_of::<T>()) as u16,
+            )
+            .into(),
+        )?;
+        let trb_ptr_waiting = ctrl_ep_ring.push(DataStageTrb::new_in(buf).into())?;
+        ctrl_ep_ring.push(StatusStageTrb::new_out().into())?;
+        self.notify_ep(slot, 1)?;
+        EventFuture::new_for_trb(&self.primary_event_ring, trb_ptr_waiting)
+            .await?
+            .transfer_result_ok()
+    }
+    pub async fn request_descriptor_for_interface<T: Sized>(
+        &self,
+        slot: u8,
+        ctrl_ep_ring: &mut CommandRing,
+        desc_type: usb::UsbDescriptorType,
+        desc_index: u8,
+        w_index: u16,
+        buf: Pin<&mut [T]>,
+    ) -> Result<()> {
+        ctrl_ep_ring.push(
+            SetupStageTrb::new(
+                SetupStageTrb::REQ_TYPE_DIR_DEVICE_TO_HOST | SetupStageTrb::REQ_TYPE_TO_INTERFACE,
+                SetupStageTrb::REQ_GET_DESCRIPTOR,
+                (desc_type as u16) << 8 | (desc_index as u16),
+                w_index,
                 (buf.len() * size_of::<T>()) as u16,
             )
             .into(),
@@ -1415,41 +1440,6 @@ impl UsbMode {
         }
     }
 }
-
-#[derive(Debug, Copy, Clone)]
-#[repr(u8)]
-#[non_exhaustive]
-#[allow(unused)]
-#[derive(PartialEq, Eq)]
-pub enum UsbDescriptorType {
-    Device = 1,
-    Config = 2,
-    String = 3,
-    Interface = 4,
-    Endpoint = 5,
-}
-
-#[derive(Debug, Copy, Clone, Default)]
-#[allow(unused)]
-#[repr(C, packed)]
-pub struct UsbDeviceDescriptor {
-    pub desc_length: u8,
-    pub desc_type: u8,
-    pub version: u16,
-    pub device_class: u8,
-    pub device_subclass: u8,
-    pub device_protocol: u8,
-    pub max_packet_size: u8,
-    pub vendor_id: u16,
-    pub product_id: u16,
-    pub device_version: u16,
-    pub manufacturer_idx: u8,
-    pub product_idx: u8,
-    pub serial_idx: u8,
-    pub num_of_config: u8,
-}
-const _: () = assert!(size_of::<UsbDeviceDescriptor>() == 18);
-unsafe impl IntoPinnedMutableSlice for UsbDeviceDescriptor {}
 
 #[derive(Copy, Clone)]
 #[repr(C, align(16))]
