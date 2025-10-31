@@ -10,6 +10,12 @@
   - static mutへの制限が厳しくなっていたのでフォントキャッシュもMutex管理に変更
   - 各種clippy警告へ対応
 
+## System Requirement
+
+- bash
+- rust toolchain
+- QEMU (x86_64)
+
 ## How to use
 
 ```
